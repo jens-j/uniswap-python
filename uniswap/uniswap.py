@@ -1,29 +1,26 @@
+#!/usr/bin/env python3
+
 import os
 import json
 import time
+import logging
 
 from web3 import Web3
 
+from ethclient import EthClient
+
+
+# module level logger
+log = logging.getLogger(__name__)
+
 
 class UniswapWrapper:
-    def __init__(self, address, private_key, provider=None, web3=None):
+    def __init__(self, address, private_key, asset_names):
 
-        if not web3:
-            # Initialize web3. Extra provider for testing.
-            if not provider:
-                self.provider = os.environ["PROVIDER"]
-                self.network = "mainnet"
-            else:
-                self.provider = provider
-                self.network = "testnet"
-
-            self.w3 = Web3(Web3.HTTPProvider(self.provider, request_kwargs={"timeout": 60}))
-        else:
-            self.w3 = web3
-            self.network = "mainnet"
+        self.asset_names = asset_names
         self.address = address
         self.private_key = private_key
-
+        self.w3 = Web3(Web3.HTTPProvider('http://localhost:8545', request_kwargs={"timeout": 60}))
 
         # This code automatically approves you for trading on the exchange.
         # max_approval is to allow the contract to exchange on your behalf.
@@ -38,12 +35,15 @@ class UniswapWrapper:
 
         # Initialize address and contract
         path = f"{os.path.dirname(os.path.abspath(__file__))}/assets/"
-        with open(os.path.abspath(path + "contract_addresses.JSON")) as f:
-            token_and_exchange_addresses = json.load(f)[self.network]
         with open(os.path.abspath(path + "uniswap_exchange.abi")) as f:
             exchange_abi = json.load(f)
         with open(os.path.abspath(path + "erc20.abi")) as f:
             erc20_abi = json.load(f)
+        with open(os.path.abspath(path + "factory.abi")) as f:
+            factory_abi = json.load(f)
+
+        self.factory_contract = self.w3.eth.contract(
+            address='0xc0a47dFe034B400B47bDaD5FecDa2621de6c4d95', abi=factory_abi)
 
         # Define exchange address, contract instance, and token_instance based on
         # token address
@@ -52,14 +52,24 @@ class UniswapWrapper:
         self.exchange_contract = {}
         self.erc20_contract = {}
 
-        for token_address, exchange_address in token_and_exchange_addresses.items():
+
+        for name in self.asset_names:
+
+            if name not in EthClient.ASSET_ADDRESS:
+                logger.warning( f"asset {name} not known by EthClient")
+                continue
+
+            # get asset contract addresses from EthClient
+            token_address = EthClient.ASSET_ADDRESS[name]
+            self.erc20_contract[token_address] = self.w3.eth.contract(
+                address=token_address, abi=erc20_abi)
+
+            # get exchange contracts from factory contract
+            exchange_address = self.factory_contract.call().getExchange(token_address)
+            print(name, exchange_address)
             self.exchange_address_from_token[token_address] = exchange_address
             self.exchange_contract[token_address] = self.w3.eth.contract(
-                address=exchange_address, abi=exchange_abi
-            )
-            self.erc20_contract[token_address] = self.w3.eth.contract(
-                address=token_address, abi=erc20_abi
-            )
+                address=exchange_address, abi=exchange_abi)
 
 
     # ------ Decorators ----------------------------------------------------------------
@@ -161,10 +171,10 @@ class UniswapWrapper:
     def make_trade(self, input_token, output_token, qty, recipient=None):
         """Make a trade by defining the qty of the input token."""
         qty = int(qty)
-        if input_token == "eth":
+        if input_token == EthClient.ASSET_ADDRESS['ETH']:
             return self._eth_to_token_swap_input(output_token, qty, recipient)
         else:
-            if output_token == "eth":
+            if output_token == EthClient.ASSET_ADDRESS['ETH']:
                 return self._token_to_eth_swap_input(input_token, qty, recipient)
             else:
                 return self._token_to_token_swap_input(input_token, qty, output_token, recipient)
@@ -173,10 +183,10 @@ class UniswapWrapper:
     def make_trade_output(self, input_token, output_token, qty, recipient=None):
         """Make a trade by defining the qty of the output token."""
         qty = int(qty)
-        if input_token == "eth":
+        if input_token == EthClient.ASSET_ADDRESS['ETH']:
             return self._eth_to_token_swap_output(output_token, qty, recipient)
         else:
-            if output_token == "eth":
+            if output_token == EthClient.ASSET_ADDRESS['ETH']:
                 return self._token_to_eth_swap_output(input_token, qty, recipient)
             else:
                 return self._token_to_token_swap_output(input_token, qty, output_token, recipient)
@@ -333,25 +343,21 @@ class UniswapWrapper:
         return int(input_amount_a), int(1.2 * input_about_b)
 
 
+def main():
+
+    logging.basicConfig(level=logging.INFO,
+                        format='[%(asctime)s|%(levelname)s|%(name)s] %(message)s',
+                        datefmt='%d-%m %H:%M:%S')
+
+    us = UniswapWrapper('0x4bEa03Ee9BA582Db3E7bD2744028FCFeff560bda',
+                        '908249A476A9C754BC3689220C03309F1882CCF4D5052FD87A90768C92ACD99E',
+                        ['ETH', 'BAT', 'DAI'])
+
+    print(us.get_eth_balance(EthClient.ASSET_ADDRESS['BAT']) * 1E-18, 'ETH')
+    print(us.get_token_balance(EthClient.ASSET_ADDRESS['BAT']) * 1E-18, 'BAT')
+    print(us.make_trade(EthClient.ASSET_ADDRESS['ETH'],
+                        EthClient.ASSET_ADDRESS['BAT'],
+                        0.05 * 1E18).decode('utf-8'))
+
 if __name__ == "__main__":
-    address = os.environ["ETH_ADDRESS"]
-    priv_key = os.environ["ETH_PRIV_KEY"]
-    provider = os.environ["TESTNET_PROVIDER"]
-    w3 = Web3(Web3.HTTPProvider(provider, request_kwargs={"timeout": 60}))
-
-    # us = UniswapWrapper(address, priv_key)
-    us = UniswapWrapper(address, priv_key, provider)
-    ONE_ETH = 1 * 10 ** 18
-    ZERO_ADDRESS = '0xD6aE8250b8348C94847280928c79fb3b63cA453e'
-    qty = 0.00000005 * ONE_ETH
-    eth_main = "0x0000000000000000000000000000000000000000"
-    bat_main = "0x0D8775F648430679A709E98d2b0Cb6250d2887EF"
-    dai_main = "0x89d24A6b4CcB1B6fAA2625fE562bDD9a23260359"
-
-    eth_test = "0x0000000000000000000000000000000000000000"
-    bat_test = "0xDA5B056Cfb861282B4b59d29c9B395bcC238D29B"
-    dai_test = "0x2448eE2641d78CC42D7AD76498917359D961A783"
-
-    print(us.make_trade_output(bat_test, eth_test, 0.00001 * ONE_ETH, ZERO_ADDRESS))
-    # print(us.make_trade_output(input_token, output_token, qty, ZERO_ADDRESS))
-
+    main()
